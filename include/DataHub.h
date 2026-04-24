@@ -246,6 +246,15 @@ public:
     }
 
     template <typename DataType>
+    bool push_data(const DataTypeId& data_type_id, frame_id_t frame_id, const DataType& data) {
+        DataBuffer<DataType>* buffer = get_data_buffer<DataType>(data_type_id);
+        if (buffer == nullptr) {
+            return false;
+        }
+        return buffer->push(frame_id, data);
+    }
+
+    template <typename DataType>
     DataBuffer<DataType>* get_data_buffer(const DataTypeId& data_type_id) {
         auto it = data_buffer_map_.find(data_type_id);
         if (it == data_buffer_map_.end()) {
@@ -262,6 +271,15 @@ public:
             return nullptr;
         }
         return holder->get();
+    }
+
+    template <typename DataType>
+    bool get_data(const DataTypeId& data_type_id, frame_id_t frame_id, DataType& data) {
+        DataBuffer<DataType>* buffer = get_data_buffer<DataType>(data_type_id);
+        if (buffer == nullptr) {
+            return false;
+        }
+        return buffer->get_by_id(frame_id, data);
     }
 
 private:

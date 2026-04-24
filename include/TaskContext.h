@@ -12,12 +12,7 @@ namespace scheduler {
 
 class TaskContext {
 public:
-    TaskContext(DataHub& data_hub,
-                const std::vector<DataTypeId>& input_data_type_ids,
-                const std::vector<DataTypeId>& output_data_type_ids)
-            : data_hub_(data_hub),
-              input_data_type_ids_(input_data_type_ids.begin(), input_data_type_ids.end()),
-              output_data_type_ids_(output_data_type_ids.begin(), output_data_type_ids.end()) {}
+    TaskContext(DataHub& data_hub) : data_hub_(data_hub) {}
 
     ~TaskContext() = default;
 
@@ -28,43 +23,16 @@ public:
 
     template <typename T>
     bool get_data(frame_id_t frame_id, DataTypeId data_type_id, T& data) {
-        if (!is_data_type_id_valid(data_type_id, /*is_input=*/true)) {
-            printf("TaskContext: Input data type `%d` is not available\n",
-                   static_cast<int32_t>(data_type_id));
-            return false;
-        }
-        auto* buffer = data_hub_.get_data_buffer<T>(data_type_id);
-        if (buffer == nullptr) {
-            return false;
-        }
-        return buffer->get_by_id(frame_id, data);
+        return data_hub_.get_data(data_type_id, frame_id, data);
     }
 
     template <typename T>
     bool set_data(frame_id_t frame_id, DataTypeId data_type_id, const T& data) {
-        if (!is_data_type_id_valid(data_type_id, /*is_input=*/false)) {
-            printf("TaskContext: Output data type `%d` is not available\n",
-                   static_cast<int32_t>(data_type_id));
-            return false;
-        }
-        auto* buffer = data_hub_.get_data_buffer<T>(data_type_id);
-        if (buffer == nullptr) {
-            return false;
-        }
-        return buffer->push(frame_id, data);
+        return data_hub_.push_data(data_type_id, frame_id, data);
     }
 
 private:
-    bool is_data_type_id_valid(DataTypeId data_type_id, bool is_input) const {
-        if (is_input) {
-            return input_data_type_ids_.find(data_type_id) != input_data_type_ids_.end();
-        }
-        return output_data_type_ids_.find(data_type_id) != output_data_type_ids_.end();
-    }
-
-    DataHub&              data_hub_;
-    std::set<DataTypeId>  input_data_type_ids_;
-    std::set<DataTypeId>  output_data_type_ids_;
+    DataHub&             data_hub_;
 };
 
 } // namespace scheduler

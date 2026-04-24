@@ -16,17 +16,17 @@ namespace scheduler {
 class Worker {
 public:
     Worker(std::string name,
-           const TaskContext& task_context,
+           TaskContext& task_context,
            task_func_t task_func)
         : name_(std::move(name)),
           task_func_(std::move(task_func)),
-          task_context_(task_context) {}
+          task_context_(std::move(task_context)) {}
 
     ~Worker() {
         stop();
     }
 
-    // 含 thread/mutex/condition_variable，无法拷贝/移动
+    // Cannot copy or move, because it contains thread/mutex/condition_variable
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
     Worker(Worker&&) = delete;
@@ -73,14 +73,16 @@ public:
     const std::string& name() const { return name_; }
 
 private:
-    std::string              name_;
-    std::thread              thread_;
-    std::mutex               mutex_;
-    std::condition_variable  condition_variable_;
-    std::atomic<bool>        running_{false};
-    std::queue<frame_id_t>   frame_queue_;
-    task_func_t              task_func_;
-    TaskContext              task_context_;
+    std::string             name_;
+    std::thread             thread_;
+    std::atomic<bool>       running_{false};
+
+    std::mutex              mutex_;
+    std::condition_variable condition_variable_;
+    std::queue<frame_id_t>  frame_queue_;
+
+    task_func_t             task_func_;
+    TaskContext             task_context_;
 };
 
 } // namespace scheduler

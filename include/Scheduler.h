@@ -25,9 +25,9 @@ public:
     Scheduler& operator=(Scheduler&&) = delete;
 
     void init_workers() {
-        for (auto& task_flow_template : task_flow_templates_) {
+        for (auto& task_flow_template : task_flows_) {
             for (const auto& task_spec : task_flow_template->task_specs()) {
-                TaskContext task_context(data_hub_, task_spec.consumes(), task_spec.produces());
+                TaskContext task_context(data_hub_);
                 workers_[task_spec.name()] =
                     std::make_unique<Worker>(task_spec.name(), task_context, task_spec.task_func());
             }
@@ -35,9 +35,9 @@ public:
     }
 
 private:
-    DataHub                                              data_hub_;
-    std::vector<std::unique_ptr<TaskFlowTemplate>>       task_flow_templates_;
-    std::map<std::string, std::unique_ptr<Worker>>       workers_;
+    DataHub                                        data_hub_;
+    std::vector<std::unique_ptr<TaskFlowTemplate>> task_flows_;
+    std::map<std::string, std::unique_ptr<Worker>> workers_;
 };
 
 } // namespace scheduler

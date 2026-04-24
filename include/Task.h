@@ -35,11 +35,11 @@ public:
     const task_func_t&              task_func() const { return task_func_; }
 
 private:
-    std::string              name_;
-    uint8_t                  priority_;
-    std::vector<DataTypeId>  consumes_;
-    std::vector<DataTypeId>  produces_;
-    task_func_t              task_func_;
+    std::string             name_;
+    uint8_t                 priority_;
+    std::vector<DataTypeId> consumes_;
+    std::vector<DataTypeId> produces_;
+    task_func_t             task_func_;
 };
 
 class TaskNode {
@@ -117,7 +117,16 @@ protected:
                 DataTypeId::DISPARITY_IMAGE,
                 DataTypeId::POINT_CLOUD
             },
-            [](TaskContext& /*task_context*/) -> bool {
+            [](TaskContext& task_context) -> bool {
+                frame_id_t frame_id = 0;
+                cv::Mat left_image;
+                cv::Mat right_image;
+                if (!task_context.get_data(frame_id, DataTypeId::LEFT_IMAGE, left_image)) {
+                    return false;
+                }
+                if (!task_context.get_data(frame_id, DataTypeId::RIGHT_IMAGE, right_image)) {
+                    return false;
+                }
                 return true;
             }
         });
