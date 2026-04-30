@@ -38,6 +38,7 @@ public:
         }
     }
 
+    // 禁止拷贝/移动：独占内存池与 mutex，拷贝会破坏所有权。
     DataPool(const DataPool&) = delete;
     DataPool& operator=(const DataPool&) = delete;
     DataPool(DataPool&&) = delete;
@@ -83,6 +84,7 @@ public:
 
     ~DataBuffer() = default;
 
+    // 禁止拷贝/移动：管理池指针与 shared_mutex，不可复制。
     DataBuffer(const DataBuffer&) = delete;
     DataBuffer& operator=(const DataBuffer&) = delete;
     DataBuffer(DataBuffer&&) = delete;
@@ -96,7 +98,7 @@ public:
     bool push(frame_id_t id, const DataType& data) {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
-        // 若相同 id 已存在，先把旧的回收掉，避免内存池泄漏和 deque/map 不一致。
+        // 同 frame_id 重复 push：先回收旧块，避免池泄漏与 buffer/map 不一致。
         auto existing = id_vs_ptr_.find(id);
         if (existing != id_vs_ptr_.end()) {
             for (auto it = buffer_.begin(); it != buffer_.end(); ++it) {
@@ -192,7 +194,7 @@ public:
     }
 
 private:
-    // Caller must hold the exclusive lock of mutex_
+    // 调用方必须已持有 mutex_ 的独占锁。
     bool pop_unlocked() {
         if (buffer_.empty()) {
             printf("DataBuffer: buffer is empty\n");
@@ -227,22 +229,24 @@ public:
     DataHub() = default;
     ~DataHub() = default;
 
+    // 禁止拷贝/移动：中心注册表含任意类型缓冲区，复制无定义良好的语义。
     DataHub(const DataHub&) = delete;
     DataHub& operator=(const DataHub&) = delete;
     DataHub(DataHub&&) = delete;
     DataHub& operator=(DataHub&&) = delete;
 
     template <typename DataType>
-    void add_data_buffer(const data_type_info_t& data_type_info) {
+    bool add_data_buffer(const data_meta_info_t& data_type_info) {
         auto it = data_buffer_map_.find(data_type_info.data_type_id);
         if (it != data_buffer_map_.end()) {
             printf("DataHub: data_type_id `%d` already exists\n",
                    static_cast<int32_t>(data_type_info.data_type_id));
-            return;
+            return false;
         }
         auto buf = std::make_shared<DataBuffer<DataType>>(
             data_type_info.capacity, data_type_info.elem_size, data_type_info.copy_func);
         data_buffer_map_[data_type_info.data_type_id] = std::any(std::move(buf));
+        return true;
     }
 
     template <typename DataType>
@@ -262,8 +266,7 @@ public:
                    static_cast<int32_t>(data_type_id));
             return nullptr;
         }
-        // std::any_cast 以指针形式调用在类型不匹配时返回 nullptr，
-        // 以值/引用形式调用则会抛 std::bad_any_cast，因此这里用指针形式。
+        // 指针形式 any_cast：类型不匹配返回 nullptr；值/引用形式会抛 bad_any_cast。
         auto* holder = std::any_cast<std::shared_ptr<DataBuffer<DataType>>>(&it->second);
         if (holder == nullptr) {
             printf("DataHub: data_type_id `%d` type mismatch\n",

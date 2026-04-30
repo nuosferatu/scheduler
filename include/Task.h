@@ -1,7 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -13,124 +20,147 @@
 
 namespace scheduler {
 
-class TaskSpec {
+class Task {
 public:
-    TaskSpec(std::string name,
-             uint8_t priority,
-             std::vector<DataTypeId> consumes,
-             std::vector<DataTypeId> produces,
-             task_func_t task_func)
-        : name_(std::move(name)),
-          priority_(priority),
-          consumes_(std::move(consumes)),
-          produces_(std::move(produces)),
-          task_func_(std::move(task_func)) {}
+    Task(const std::string& name) : name_(name) {}
+    virtual ~Task() = default;
 
-    ~TaskSpec() = default;
+    // 禁止拷贝/赋值：多态基类，拷贝会产生切片与错误所有权语义。
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
 
-    const std::string&              name() const      { return name_; }
-    uint8_t                         priority() const  { return priority_; }
-    const std::vector<DataTypeId>&  consumes() const  { return consumes_; }
-    const std::vector<DataTypeId>&  produces() const  { return produces_; }
-    const task_func_t&              task_func() const { return task_func_; }
+    const std::string& name() const { return name_; }
+    virtual uint8_t priority() const { return 0; }
+
+    virtual const std::vector<DataTypeId>& consumes() const = 0;
+    virtual const std::vector<DataTypeId>& produces() const = 0;
+
+    virtual bool init(TaskContext& ctx) { return true; }  // 只会调用一次
+    virtual bool run(frame_id_t frame_id, TaskContext& ctx) = 0;
+    virtual void stop(TaskContext& ctx) {}  // 只会调用一次
 
 private:
-    std::string             name_;
-    uint8_t                 priority_;
-    std::vector<DataTypeId> consumes_;
-    std::vector<DataTypeId> produces_;
-    task_func_t             task_func_;
+    std::string name_;
 };
 
-class TaskNode {
-public:
-    explicit TaskNode(TaskSpec& task_spec) : task_spec_(task_spec) {}
-    ~TaskNode() = default;
-
-private:
-    frame_id_t  frame_id_ = 0;
-    // task_node_id_t task_node_id_ = 0;
-    TaskSpec&   task_spec_;
-    TaskStatus  status_ = TaskStatus::INITIALIZED;
-};
-
-// 任务流模板：抽象基类
-// 具体的任务流（如 StereoVisionFlow、SegmentationFlow 等）必须继承本类，
-// 并实现 declare_data_types() / declare_tasks() 这两个纯虚钩子。
-// 外部统一通过 build() 触发初始化，build() 的调用顺序由基类固定，保证
-// 数据类型先于任务被声明。
 class TaskFlowTemplate {
 public:
-    explicit TaskFlowTemplate(std::string name) : name_(std::move(name)) {}
-
-    // 多态基类必须 virtual dtor
+    TaskFlowTemplate(const std::string& name) : name_(name) {}
     virtual ~TaskFlowTemplate() = default;
 
-    // 抽象基类通常不允许拷贝/赋值，避免对象切片
+    // 禁止拷贝/赋值：持有 unique_ptr 任务列表与注册闭包，不可复制。
     TaskFlowTemplate(const TaskFlowTemplate&) = delete;
     TaskFlowTemplate& operator=(const TaskFlowTemplate&) = delete;
 
-    // Template Method：骨架流程由基类固定，子类只负责填内容
-    virtual void build() final {
-        declare_data_types();
-        declare_tasks();
+    const std::string& name() const { return name_; }
+
+    void add_task(std::unique_ptr<Task> task) {
+        printf("[任务流] 任务流 '%s' 添加任务: '%s'\n",
+               name_.c_str(), task->name().c_str());
+        if (task == nullptr) {
+            return;
+        }
+        tasks_.push_back(std::move(task));
     }
 
-    const std::string&                   name() const             { return name_; }
-    const std::vector<TaskSpec>&         task_specs() const       { return task_specs_; }
-    const std::vector<data_type_info_t>& data_type_infos() const  { return data_type_infos_; }
-
-protected:
-    // 子类声明该任务流用到的 DataTypeId（填充 data_type_infos_）
-    virtual void declare_data_types() = 0;
-
-    // 子类声明该任务流包含的 TaskSpec（填充 task_specs_）
-    virtual void declare_tasks() = 0;
-
-    std::string                   name_;
-    std::vector<TaskSpec>         task_specs_;
-    std::vector<data_type_info_t> data_type_infos_;
-};
-
-class StereoVisionFlow : public TaskFlowTemplate {
-public:
-    StereoVisionFlow() : TaskFlowTemplate("StereoVisionFlow") {}
-    ~StereoVisionFlow() override = default;
-
-protected:
-    void declare_data_types() override {
-        data_type_infos_.push_back({DataTypeId::LEFT_IMAGE,       2, sizeof(cv::Mat), nullptr});
-        data_type_infos_.push_back({DataTypeId::RIGHT_IMAGE,      2, sizeof(cv::Mat), nullptr});
-        data_type_infos_.push_back({DataTypeId::DISPARITY_IMAGE,  2, sizeof(cv::Mat), nullptr});
-        data_type_infos_.push_back({DataTypeId::POINT_CLOUD,      2, sizeof(cv::Mat), nullptr});
+    // 任务流中的任务使用的所有数据类型，都要将元信息注册到任务流中
+    //  在调度器启动前，会注册到DataHub中，缺失元信息会导致校验失败，无法启动
+    template <typename T>
+    void register_data(DataTypeId id,
+                       size_t capacity = DefaultBufferCapacity,
+                       copy_func_t copy_func = nullptr) {
+        data_meta_info_t info = {id, capacity, sizeof(T), copy_func};
+        data_registry_[id] = [info](DataHub& hub) -> bool {
+            return hub.add_data_buffer<T>(info);
+        };
+        printf("[任务流] 任务流 '%s' 注册数据: 数据类型 %u, 容量 %zu, %s拷贝函数\n",
+               name_.c_str(), static_cast<uint32_t>(id), capacity,
+               copy_func == nullptr ? "无" : "有");
     }
 
-    void declare_tasks() override {
-        task_specs_.push_back(TaskSpec{
-            "StereoImagesPreprocess",
-            0,
-            {
-                DataTypeId::LEFT_IMAGE,
-                DataTypeId::RIGHT_IMAGE
-            },
-            {
-                DataTypeId::DISPARITY_IMAGE,
-                DataTypeId::POINT_CLOUD
-            },
-            [](TaskContext& task_context) -> bool {
-                frame_id_t frame_id = 0;
-                cv::Mat left_image;
-                cv::Mat right_image;
-                if (!task_context.get_data(frame_id, DataTypeId::LEFT_IMAGE, left_image)) {
-                    return false;
-                }
-                if (!task_context.get_data(frame_id, DataTypeId::RIGHT_IMAGE, right_image)) {
-                    return false;
-                }
-                return true;
+    // 当前任务流中所有注册的数据，在DataHub中创建数据缓冲区
+    bool init_data_hub(DataHub& hub) const {
+        for (const auto& kv : data_registry_) {
+            if (!kv.second(hub)) {
+                return false;
             }
-        });
+            printf("[任务流] 任务流 '%s' 初始化数据缓冲区: 数据类型 %u\n", name_.c_str(), static_cast<uint32_t>(kv.first));
+        }
+        return true;
     }
+
+    // 校验当前任务流中所有任务提及的数据元信息是否都被注册过
+    bool validate_data_registry() const {
+        std::set<DataTypeId> all_used;
+        for (const auto& t : tasks_) {
+            if (!t) {
+                continue;
+            }
+            for (auto id : t->consumes()) {
+                all_used.insert(id);
+            }
+            for (auto id : t->produces()) {
+                all_used.insert(id);
+            }
+        }
+        for (auto id : all_used) {
+            if (data_registry_.find(id) == data_registry_.end()) {
+                printf("[任务流校验] 数据类型未注册: 任务流 = '%s', 数据类型 = %u\n",
+                       name_.c_str(), static_cast<uint32_t>(id));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const std::vector<std::unique_ptr<Task>>& tasks() const noexcept {
+        return tasks_;
+    }
+
+    Task* find(const std::string& task_name) const {
+        for (const auto& t : tasks_) {
+            if (t && t->name() == task_name) {
+                return t.get();
+            }
+        }
+        return nullptr;
+    }
+
+    std::vector<DataTypeId> all_consumes() const {
+        if (!all_consumes_cached_) {
+            std::set<DataTypeId> unique;
+            for (const auto& t : tasks_) {
+                const auto& c = t->consumes();
+                unique.insert(c.begin(), c.end());
+            }
+            all_consumes_ = std::vector<DataTypeId>(unique.begin(), unique.end());
+            all_consumes_cached_ = true;
+        }
+        return all_consumes_;
+    }
+
+    std::vector<DataTypeId> all_produces() const {
+        if (!all_produces_cached_) {
+            std::set<DataTypeId> unique;
+            for (const auto& t : tasks_) {
+                const auto& p = t->produces();
+                unique.insert(p.begin(), p.end());
+            }
+            all_produces_ = std::vector<DataTypeId>(unique.begin(), unique.end());
+            all_produces_cached_ = true;
+        }
+        return all_produces_;
+    }
+
+private:
+    mutable std::vector<DataTypeId> all_consumes_;
+    mutable std::vector<DataTypeId> all_produces_;
+    mutable bool all_consumes_cached_ = false;
+    mutable bool all_produces_cached_ = false;
+
+    std::string name_;
+    std::vector<std::unique_ptr<Task>> tasks_;
+    std::map<DataTypeId, std::function<bool(DataHub&)>> data_registry_;
 };
 
 } // namespace scheduler

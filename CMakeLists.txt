@@ -51,14 +51,18 @@ message(STATUS "  OpenCV_LIBS         = ${OpenCV_LIBS}")
 #   - 新增对外头文件时在这个列表里追加
 # ============================================================
 set(SCHEDULER_PRIVATE_HEADERS
-    include/DataHub.h
-    include/Task.h
-    include/Type.h
+    # 当前没有内部专用头文件；example / scheduler_demo 编译需要完整的
+    # 头文件链，所以下面 PUBLIC_HEADERS 列出的都会随库一起装出去。
+    # 新增"仅库内部使用"的头文件时在这里追加。
 )
 
 set(SCHEDULER_PUBLIC_HEADERS
-    # 目前没有对外头文件；新增时追加，例如：
-    # include/Scheduler.h
+    include/DataHub.h
+    include/Scheduler.h
+    include/Task.h
+    include/TaskContext.h
+    include/Type.h
+    include/Worker.h
 )
 
 # ---- 源文件 ----
@@ -130,15 +134,38 @@ endif()
 # ---- examples ----
 option(SCHEDULER_BUILD_EXAMPLES "Build example programs" ON)
 if(SCHEDULER_BUILD_EXAMPLES)
-    add_executable(example examples/example.cpp
+    find_package(Threads REQUIRED)
+
+    # ---- scheduler_demo: 调度器使用流程的最小 demo ----
+    add_executable(scheduler_demo examples/scheduler_demo.cpp
         include/Scheduler.h
         include/Worker.h
-        include/TaskContext.h)
-    target_link_libraries(example PRIVATE scheduler)
-    # examples 作为同项目内部产物，允许访问全部头文件（含内部头文件）
-    target_include_directories(example
+        include/TaskContext.h
+        include/Task.h
+        include/Type.h
+        include/DataHub.h)
+    target_link_libraries(scheduler_demo PRIVATE scheduler)
+    target_include_directories(scheduler_demo
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    find_package(Threads REQUIRED)
-    target_link_libraries(example PRIVATE Threads::Threads)
+    target_link_libraries(scheduler_demo PRIVATE Threads::Threads)
+
+    # ============================================================
+    # 把 example 源码 + 独立 CMakeLists.txt 一起装到
+    #   ${CMAKE_INSTALL_PREFIX}/example/
+    # 下游验证安装产物：
+    #   cd install/example
+    #   cmake -S . -B build && cmake --build build -j
+    #   ./build/scheduler_demo
+    # 该 CMakeLists 只用 install/include 和 install/lib 编译，
+    # 完全不依赖源码树。
+    # ============================================================
+    install(FILES
+        examples/scheduler_demo.cpp
+        DESTINATION example
+    )
+    install(FILES examples/standalone-CMakeLists.txt
+        DESTINATION example
+        RENAME CMakeLists.txt
+    )
 endif()

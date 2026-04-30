@@ -1,0 +1,98 @@
+# ============================================================
+# scheduler examples - 独立 CMakeLists
+# ------------------------------------------------------------
+# 这份 CMakeLists.txt 与 example 源码一起被装到
+#   ${CMAKE_INSTALL_PREFIX}/example/
+# 下，目的是验证 scheduler 安装产物（install/include + install/lib）
+# 是否能在脱离源码树的情况下被外部工程使用。
+#
+# 默认假设当前目录与 install/include、install/lib 同级，即典型布局：
+#   install/
+#     ├── include/scheduler/*.h
+#     ├── lib/libscheduler.so
+#     └── example/                 <-- 当前目录
+#         ├── CMakeLists.txt
+#         └── scheduler_demo.cpp
+#
+# 用法：
+#   cd install/example
+#   cmake -S . -B build
+#   cmake --build build -j
+#   ./build/scheduler_demo
+#
+# 如果把 install/example 拷到了别处、或 include/lib 不在同级，
+# 用 -DSCHEDULER_INSTALL_PREFIX=/path/to/install 显式指定。
+# ============================================================
+
+cmake_minimum_required(VERSION 3.14)
+project(scheduler_examples LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ---- 定位 scheduler 的安装根 ----
+get_filename_component(_default_prefix
+    "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(SCHEDULER_INSTALL_PREFIX "${_default_prefix}" CACHE PATH
+    "scheduler 安装根目录(包含 include/ 和 lib/)")
+
+set(SCHEDULER_INCLUDE_DIR "${SCHEDULER_INSTALL_PREFIX}/include")
+set(SCHEDULER_LIB_DIR     "${SCHEDULER_INSTALL_PREFIX}/lib")
+
+message(STATUS "scheduler install prefix: ${SCHEDULER_INSTALL_PREFIX}")
+
+if(NOT EXISTS "${SCHEDULER_INCLUDE_DIR}/scheduler/Scheduler.h")
+    message(FATAL_ERROR
+        "在 ${SCHEDULER_INCLUDE_DIR}/scheduler 下找不到 Scheduler.h，"
+        "请通过 -DSCHEDULER_INSTALL_PREFIX=<path> 指定 scheduler 的安装根目录。")
+endif()
+
+# ---- 第三方依赖 ----
+# scheduler 头文件里直接 #include <opencv2/opencv.hpp>，所以下游同样需要
+# 找到 OpenCV 的头/库；如果 libscheduler.so 存在，它在 link 时已带 NEEDED，
+# 下游只是跟着找头文件即可。
+find_package(OpenCV REQUIRED)
+find_package(Threads REQUIRED)
+
+# ---- 把外部安装出来的 scheduler 库包装成 IMPORTED 目标 ----
+# 如果 src/ 下还没有 .cpp，主工程的 scheduler 是 INTERFACE 库（header-only），
+# install/lib 下不会有 libscheduler.so，这时退化为 INTERFACE 目标即可。
+find_library(SCHEDULER_LIBRARY scheduler
+    PATHS "${SCHEDULER_LIB_DIR}"
+    NO_DEFAULT_PATH)
+
+if(SCHEDULER_LIBRARY)
+    message(STATUS "scheduler library : ${SCHEDULER_LIBRARY}")
+    add_library(scheduler::scheduler SHARED IMPORTED)
+    set_target_properties(scheduler::scheduler PROPERTIES
+        IMPORTED_LOCATION "${SCHEDULER_LIBRARY}"
+        # 头文件实际装在 include/scheduler/，但代码里的 #include 是不带
+        # 前缀的 "Scheduler.h" 等，所以把 include/scheduler 也加进搜索路径。
+        INTERFACE_INCLUDE_DIRECTORIES
+            "${SCHEDULER_INCLUDE_DIR};${SCHEDULER_INCLUDE_DIR}/scheduler;${OpenCV_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
+    )
+else()
+    message(STATUS
+        "scheduler library : <not found in ${SCHEDULER_LIB_DIR}>, "
+        "按 header-only(INTERFACE) 处理")
+    add_library(scheduler::scheduler INTERFACE IMPORTED)
+    set_target_properties(scheduler::scheduler PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES
+            "${SCHEDULER_INCLUDE_DIR};${SCHEDULER_INCLUDE_DIR}/scheduler;${OpenCV_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${OpenCV_LIBS}"
+    )
+endif()
+
+# ---- 编译两个 demo ----
+add_executable(scheduler_demo scheduler_demo.cpp)
+target_link_libraries(scheduler_demo PRIVATE
+    scheduler::scheduler
+    Threads::Threads)
+if(SCHEDULER_LIBRARY)
+    # 让运行时直接能找到 install/lib/libscheduler.so，
+    # 不需要额外配置 LD_LIBRARY_PATH。
+    set_target_properties(scheduler_demo PROPERTIES
+        BUILD_RPATH   "${SCHEDULER_LIB_DIR}"
+        INSTALL_RPATH "${SCHEDULER_LIB_DIR}")
+endif()
