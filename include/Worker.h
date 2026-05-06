@@ -34,12 +34,12 @@ public:
         stop();
     }
 
-    // 禁止拷贝/移动：含 std::thread、mutex 与任务队列，语义上不可复制。
     Worker(const Worker&) = delete;
     Worker& operator=(const Worker&) = delete;
     Worker(Worker&&) = delete;
     Worker& operator=(Worker&&) = delete;
 
+    // 启动工作线程
     void start() {
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) {
@@ -48,6 +48,7 @@ public:
         thread_ = std::thread([this] { run_loop(); });
     }
 
+    // 停止工作线程
     void stop() {
         bool expected = true;
         if (!running_.compare_exchange_strong(expected, false)) {
@@ -59,6 +60,7 @@ public:
         }
     }
 
+    // 将帧 ID 加入工作线程的帧队列
     void enqueue(frame_id_t frame_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!running_.load()) {
@@ -72,20 +74,26 @@ public:
 
 private:
     void run_loop() {
+        // 1. 启动工作线程
         if (task_context_ == nullptr || task_ == nullptr ||
             !task_->init(*task_context_)) {
             running_.store(false);
             return;
         }
 
+        // 2. 工作线程循环
         while (running_.load()) {
+            // 等待帧 ID
             auto frame_id = wait_for_frame();
             if (!frame_id.has_value()) {
                 break;
             }
+
+            // 执行帧
             run_frame(*frame_id);
         }
 
+        // 3. 停止工作线程
         task_->stop(*task_context_);
         running_.store(false);
     }
@@ -105,17 +113,24 @@ private:
     }
 
     void run_frame(frame_id_t frame_id) {
+        // 1. 持有优先级锁，如果有优先级的话
         task_context_->hold_priority_lock();
+
+        // 2. 执行任务
         const bool ok = task_->run(frame_id, *task_context_);
+
+        // 3. 释放优先级锁
         task_context_->release_priority_lock();
+
+        // 4. 通知调度器任务完成
         if (on_task_done_) {
             on_task_done_(name_, frame_id, ok ? TaskStatus::COMPLETED : TaskStatus::FAILED);
         }
     }
 
-    std::string             name_;
-    std::thread             thread_;
-    std::atomic<bool>       running_{false};
+    std::string       name_;
+    std::thread       thread_;
+    std::atomic<bool> running_{false};
 
     std::mutex              mutex_;
     std::condition_variable condition_variable_;

@@ -20,29 +20,27 @@ public:
                          bool requires_priority_lock = false,
                          release_priority_cb_t release_cb = nullptr)
         : data_hub_(data_hub),
-          release_priority_cb_(std::move(release_cb)),
           requires_priority_lock_(requires_priority_lock),
+          release_priority_cb_(std::move(release_cb)),
           priority_held_(false) {}
 
     ~TaskContext() = default;
 
-    // 禁止拷贝/移动：绑定 DataHub 引用与调度器回调，复制会导致悬空引用与重复释放锁语义。
     TaskContext(const TaskContext&) = delete;
     TaskContext& operator=(const TaskContext&) = delete;
     TaskContext(TaskContext&&) = delete;
     TaskContext& operator=(TaskContext&&) = delete;
 
-    template <typename T>
-    bool get_data(frame_id_t frame_id, DataTypeId data_type_id, T& data) {
-        return data_hub_.get_data(data_type_id, frame_id, data);
+    template <typename T, typename Id>
+    bool get_data(frame_id_t frame_id, Id data_type_id, T& data) {
+        return data_hub_.get_data(static_cast<data_type_id_t>(data_type_id), frame_id, data);
     }
 
-    template <typename T>
-    bool set_data(frame_id_t frame_id, DataTypeId data_type_id, const T& data) {
-        return data_hub_.push_data(data_type_id, frame_id, data);
+    template <typename T, typename Id>
+    bool set_data(frame_id_t frame_id, Id data_type_id, const T& data) {
+        return data_hub_.push_data(static_cast<data_type_id_t>(data_type_id), frame_id, data);
     }
 
-    // priority==0 或未持锁时为 no-op。
     void release_priority_lock() {
         if (!priority_held_) {
             return;

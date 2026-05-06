@@ -1,6 +1,6 @@
 .clangd/
 build/
+examples/build/
 compile_commands.json
-install/
 .vscode/
 .cursor/

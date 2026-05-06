@@ -14,6 +14,7 @@
 #include "DataHub.h"
 #include "Task.h"
 #include "TaskContext.h"
+#include "TaskFlow.h"
 #include "Type.h"
 #include "Worker.h"
 
@@ -26,13 +27,12 @@ public:
     }
     ~Scheduler() { stop(); }
 
-    // 禁止拷贝/移动：管理互斥量、Worker 线程与帧运行时状态，拷贝会导致双重释放与数据竞争。
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
     Scheduler(Scheduler&&) = delete;
     Scheduler& operator=(Scheduler&&) = delete;
 
-    void register_task_flow(std::unique_ptr<TaskFlowTemplate> flow) {
+    void register_task_flow(std::unique_ptr<TaskFlow> flow) {
         if (flow == nullptr) {
             return;
         }
@@ -50,6 +50,13 @@ public:
         }
         printf("[调度器] <<< 数据元信息校验通过\n");
 
+        printf("[调度器] >>> 开始校验数据类型ID唯一性\n");
+        if (!validate_data_id_uniqueness()) {
+            printf("[调度器] <<< 数据类型ID唯一性校验失败\n");
+            return false;
+        }
+        printf("[调度器] <<< 数据类型ID唯一性校验通过\n");
+
         printf("[调度器] >>> 开始初始化数据缓冲区\n");
         for (auto& flow : task_flows_) {
             if (!flow->init_data_hub(data_hub_)) {
@@ -59,6 +66,27 @@ public:
         }
         printf("[调度器] <<< 数据缓冲区初始化完成\n");
 
+        return true;
+    }
+
+    // 检查不同任务流之间是否有重复注册同一 data_type_id 的情况。
+    bool validate_data_id_uniqueness() const {
+        std::map<data_type_id_t, std::string> id_owner;
+        for (const auto& flow : task_flows_) {
+            if (!flow) {
+                continue;
+            }
+            for (auto& [id, _] : flow->data_registry()) {
+                auto it = id_owner.find(id);
+                if (it != id_owner.end()) {
+                    printf("[调度器] [Error] 数据类型 %u 被多个任务流重复注册 "
+                           "(任务流 '%s' 和 '%s')\n",
+                           id, it->second.c_str(), flow->name().c_str());
+                    return false;
+                }
+                id_owner.emplace(id, flow->name());
+            }
+        }
         return true;
     }
 
@@ -88,29 +116,29 @@ public:
     }
 
     // 外部数据输入
-    template <typename T>
-    bool feed(frame_id_t frame_id, DataTypeId id, const T& data) {
+    template <typename T, typename Id>
+    bool feed(frame_id_t frame_id, Id id, const T& data) {
+        const auto raw_id = static_cast<data_type_id_t>(id);
         if (!running_.load()) {
             printf("[调度器] 调度器未运行\n");
             return false;
         }
-        auto producer_it = producer_of_.find(id);
+        auto producer_it = producer_of_.find(raw_id);
         if (producer_it != producer_of_.end()) {
             printf("[调度器] 数据类型 %u 是内部数据 "
                    "(由 '%s' 生产), 不是外部输入\n",
-                   static_cast<uint32_t>(id),
+                   raw_id,
                    producer_it->second.c_str());
             return false;
         }
-        if (external_inputs_.count(id) == 0) {
-            printf("[调度器] 数据类型 %u 不是已注册的外部输入\n",
-                   static_cast<uint32_t>(id));
+        if (external_inputs_.count(raw_id) == 0) {
+            printf("[调度器] 数据类型 %u 不是已注册的外部输入\n", raw_id);
             return false;
         }
-        if (!data_hub_.push_data<T>(id, frame_id, data)) {
+        if (!data_hub_.push_data<T>(raw_id, frame_id, data)) {
             return false;
         }
-        on_data_arrived_(frame_id, id);
+        on_data_arrived(frame_id, raw_id);
         return true;
     }
 
@@ -118,11 +146,12 @@ private:
     // 帧实例，保存一帧中所有任务的状态信息
     struct FrameInstance {
         std::map<std::string, TaskStatus> task_status;   // 任务状态
-        std::set<DataTypeId>              arrived;       // 已到达的数据类型
-        std::set<DataTypeId>              failed;        // 已失效的数据类型（再也来不了了）
+        std::set<data_type_id_t>          arrived;       // 已到达的数据类型
+        std::set<data_type_id_t>          failed;        // 已失效的数据类型（再也来不了了）
         size_t                            finished = 0;  // 完成的任务个数（包括 COMPLETED、FAILED、SKIPPED）
     };
 
+    // 待分发的任务
     struct ReadyItem {
         frame_id_t  frame_id = 0;
         std::string task_name;
@@ -184,19 +213,19 @@ private:
                 auto it = producer_of_.find(id);
                 if (it != producer_of_.end()) {
                     printf("[调度器] [Error] 数据类型 %u 发现多个生产者 (任务 '%s' 和 '%s')\n",
-                           static_cast<uint32_t>(id), it->second.c_str(), name.c_str());
+                           id, it->second.c_str(), name.c_str());
                     return false;
                 }
                 producer_of_[id] = name;
-                printf("[调度器] 数据类型 %u 发现生产者 '%s'\n", static_cast<uint32_t>(id), name.c_str());
+                printf("[调度器] 数据类型 %u 发现生产者 '%s'\n", id, name.c_str());
             }
         }
         return true;
     }
 
     bool build_external_inputs() {
-        std::set<DataTypeId> all_produced;
-        std::set<DataTypeId> all_consumed;
+        std::set<data_type_id_t> all_produced;
+        std::set<data_type_id_t> all_consumed;
 
         for (auto& kv : tasks_) {
             const Task* task = kv.second;
@@ -211,7 +240,7 @@ private:
         for (auto id : all_consumed) {
             if (all_produced.find(id) == all_produced.end()) {
                 external_inputs_.insert(id);
-                printf("[调度器] 发现外部输入数据类型 %u\n", static_cast<uint32_t>(id));
+                printf("[调度器] 发现外部输入数据类型 %u\n", id);
             }
         }
 
@@ -230,11 +259,11 @@ private:
                     data_hub_,
                     task->priority() > 0,
                     [this]() {
-                        release_priority_lock();
+                        on_release_priority_lock();
                     }
                 ),
                 [this](const std::string& name, frame_id_t fid, TaskStatus st) {
-                    on_task_done_(name, fid, st);
+                    on_task_done(name, fid, st);
                 }
             );
         }
@@ -260,8 +289,7 @@ private:
     }
 
     // 查找帧实例，如果不存在则创建
-    //  调用方必须持有 in_flight_mutex_
-    FrameInstance& ensure_frame_locked_(frame_id_t frame_id) {
+    FrameInstance& ensure_frame_locked(frame_id_t frame_id) {
         auto it = in_flight_.find(frame_id);
         if (it != in_flight_.end()) {
             return it->second;
@@ -275,10 +303,8 @@ private:
         return fi;
     }
 
-    // 调用方必须持有 in_flight_mutex_
-    void scan_locked_(FrameInstance& fi, frame_id_t frame_id) {
+    void skip_failed_locked(FrameInstance& fi, frame_id_t frame_id) {
         while (mark_new_skipped_locked(fi)) {}
-        enqueue_ready_locked(fi, frame_id);
     }
 
     bool mark_new_skipped_locked(FrameInstance& fi) {
@@ -309,7 +335,7 @@ private:
                 continue;
             }
             Task* task = tasks_.at(name);
-            if (!has_all_inputs_arrived_(fi, task)) {
+            if (!has_all_inputs_arrived(fi, task)) {
                 continue;
             }
             kv.second = TaskStatus::READY;
@@ -329,7 +355,7 @@ private:
         return false;
     }
 
-    bool has_all_inputs_arrived_(const FrameInstance& fi, const Task* task) const {
+    bool has_all_inputs_arrived(const FrameInstance& fi, const Task* task) const {
         for (auto id : task->consumes()) {
             if (fi.arrived.count(id) == 0) {
                 return false;
@@ -338,18 +364,19 @@ private:
         return true;
     }
 
-    void on_data_arrived_(frame_id_t frame_id, DataTypeId id) {
+    void on_data_arrived(frame_id_t frame_id, data_type_id_t id) {
         {
             std::lock_guard<std::mutex> lock(in_flight_mutex_);
-            FrameInstance& fi = ensure_frame_locked_(frame_id);
+            FrameInstance& fi = ensure_frame_locked(frame_id);
             fi.arrived.insert(id);
-            scan_locked_(fi, frame_id);
-            erase_frame_if_done_locked_(frame_id, fi);
+            skip_failed_locked(fi, frame_id);
+            enqueue_ready_locked(fi, frame_id);
+            erase_frame_if_done_locked(frame_id, fi);
         }
-        dispatch_pending_();
+        dispatch_pending();
     }
 
-    void on_task_done_(const std::string& name,
+    void on_task_done(const std::string& name,
                         frame_id_t frame_id,
                         TaskStatus status) {
         {
@@ -357,16 +384,16 @@ private:
             auto fit = in_flight_.find(frame_id);
             if (fit != in_flight_.end()) {
                 FrameInstance& fi = fit->second;
-                mark_task_finished_locked_(fi, name, status);
-                scan_locked_(fi, frame_id);
-                erase_frame_if_done_locked_(frame_id, fi);
+                mark_task_finished_locked(fi, name, status);
+                skip_failed_locked(fi, frame_id);
+                enqueue_ready_locked(fi, frame_id);
+                erase_frame_if_done_locked(frame_id, fi);
             }
         }
-        dispatch_pending_();
+        dispatch_pending();
     }
 
-    // 调用方必须持有 in_flight_mutex_
-    void mark_task_finished_locked_(FrameInstance& fi,
+    void mark_task_finished_locked(FrameInstance& fi,
                                     const std::string& name,
                                     TaskStatus status) {
         auto sit = fi.task_status.find(name);
@@ -388,19 +415,19 @@ private:
         }
     }
 
-    void erase_frame_if_done_locked_(frame_id_t frame_id, FrameInstance& fi) {
+    void erase_frame_if_done_locked(frame_id_t frame_id, FrameInstance& fi) {
         if (fi.finished >= tasks_.size()) {
             in_flight_.erase(frame_id);
         }
     }
 
-    // 锁顺序: in_flight_mutex_ -> Worker::mutex_。调度决策仅在持 in_flight_mutex_ 时做出，
-    // Worker::enqueue 在锁外调用，避免持锁调用外部逻辑、拉长临界区。
-    void dispatch_pending_() {
+    // 调度决策持 in_flight_mutex_ 锁
+    // enqueue 在锁外调用
+    void dispatch_pending() {
         std::vector<ReadyItem> to_dispatch;
         {
             std::lock_guard<std::mutex> lock(in_flight_mutex_);
-            collect_dispatchable_locked_(to_dispatch);
+            collect_dispatchable_locked(to_dispatch);
         }
         for (auto& item : to_dispatch) {
             auto wit = workers_.find(item.task_name);
@@ -410,23 +437,22 @@ private:
         }
     }
 
-    // 调用方必须持有 in_flight_mutex_
-    void collect_dispatchable_locked_(std::vector<ReadyItem>& out) {
+    void collect_dispatchable_locked(std::vector<ReadyItem>& out) {
         auto it = ready_queue_.begin();
         while (it != ready_queue_.end() && it->first == 0) {
-            mark_running_locked_(it->second);
+            mark_running_locked(it->second);
             out.push_back(std::move(it->second));
             it = ready_queue_.erase(it);
         }
         if (!priority_lock_held_ && it != ready_queue_.end()) {
             priority_lock_held_ = true;
-            mark_running_locked_(it->second);
+            mark_running_locked(it->second);
             out.push_back(std::move(it->second));
             ready_queue_.erase(it);
         }
     }
 
-    void mark_running_locked_(const ReadyItem& item) {
+    void mark_running_locked(const ReadyItem& item) {
         auto fit = in_flight_.find(item.frame_id);
         if (fit == in_flight_.end()) {
             return;
@@ -437,26 +463,27 @@ private:
         }
     }
 
-    // 由高优先级任务结束时调用：清除全局优先级占用后再 dispatch，使下一高优任务可出队。
-    void release_priority_lock() {
+    // 高优先级任务结束时调用
+    // 释放锁，并触发任务分发
+    void on_release_priority_lock() {
         {
             std::lock_guard<std::mutex> lock(in_flight_mutex_);
             priority_lock_held_ = false;
         }
-        dispatch_pending_();
+        dispatch_pending();
     }
 
 private:
     DataHub                                        data_hub_;
-    std::vector<std::unique_ptr<TaskFlowTemplate>> task_flows_;
-    std::map<std::string, std::unique_ptr<Worker>> workers_;  // key: 任务名称, value: 工作线程
+    std::vector<std::unique_ptr<TaskFlow>> task_flows_;
+    std::map<std::string, std::unique_ptr<Worker>> workers_;
 
     // 静态信息
-    std::map<std::string, Task*>                   tasks_;            // key: 任务名称, value: 任务指针
-    std::map<DataTypeId, std::string>              producer_of_;      // key: 数据类型, value: 生产者任务名
-    std::set<DataTypeId>                           external_inputs_;  // 外部输入的数据，内部不生产
+    std::map<std::string, Task*>          tasks_;            // 任务指针
+    std::map<data_type_id_t, std::string> producer_of_;      // 数据的生产者
+    std::set<data_type_id_t>              external_inputs_;  // 外部输入
 
-    // in_flight_ / ready_queue_ / priority_lock_held_ 由 in_flight_mutex_ 保护。
+    // 执行队列
     std::mutex                                       in_flight_mutex_;
     std::map<frame_id_t, FrameInstance>              in_flight_;
     std::multimap<uint8_t, ReadyItem>                ready_queue_;
