@@ -1,15 +1,13 @@
-#include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <iostream>
 #include <memory>
 #include <thread>
 #include <vector>
 
-#include "Scheduler.h"
-#include "Task.h"
-#include "TaskContext.h"
-#include "Type.h"
+#include "scheduler/Scheduler.h"
+#include "scheduler/Task.h"
+#include "scheduler/TaskContext.h"
+#include "scheduler/Type.h"
 
 using scheduler::data_type_id_t;
 using scheduler::frame_id_t;
@@ -17,188 +15,219 @@ using scheduler::Scheduler;
 using scheduler::Task;
 using scheduler::TaskContext;
 using scheduler::TaskFlow;
+using scheduler::TaskStatus;
 
 namespace demo {
 
 enum class DataTypeId : data_type_id_t {
-    LEFT_IMAGE            = 0,
-    RIGHT_IMAGE           = 1,
-    LEFT_IMAGE_PROCESSED  = 2,
-    RIGHT_IMAGE_PROCESSED = 3,
-    DISPARITY_IMAGE       = 4,
-    POINT_CLOUD           = 5,
-    SEGMENT_RESULT        = 6,
-};
-
-struct Point {
-    float   x;
-    float   y;
-    float   z;
-    int32_t type;
-};
-
-struct PointCloud {
-    double             timestamp;
-    std::vector<Point> points;
+    X = 1,
+    Y = 2,
+    Z = 3,
+    A = 4,
+    B = 5,
 };
 
 } // namespace demo
 
 using demo::DataTypeId;
 
-class AddTenTask final : public Task {
+class XPlus2EqualsYTask final : public Task {
 public:
-    AddTenTask() : Task("Add10") {
-        printf("[AddTenTask] 创建任务 '%s'\n", name().c_str());
-    }
+    XPlus2EqualsYTask() : Task("X+2=Y") {}
 
     const std::vector<data_type_id_t>& consumes() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::LEFT_IMAGE),
+            static_cast<data_type_id_t>(DataTypeId::X),
         };
         return v;
     }
 
     const std::vector<data_type_id_t>& produces() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::LEFT_IMAGE_PROCESSED),
+            static_cast<data_type_id_t>(DataTypeId::Y),
         };
         return v;
     }
 
-    bool run(frame_id_t fid, TaskContext& ctx) override {
-        int x = 0;
-        if (!ctx.get_data(fid, DataTypeId::LEFT_IMAGE, x)) {
-            return false;
+    auto run(frame_id_t frame_id, TaskContext& ctx) -> TaskStatus override {
+        auto x_lease = ctx.read_data_lease(frame_id, static_cast<data_type_id_t>(DataTypeId::X));
+        if (!x_lease.ok()) {
+            return TaskStatus::FAILED;
         }
+        const int X = *x_lease.as<int>();
 
         // 失效测试：让第3帧失败，测试后续任务是否被跳过
-        if (fid == 3) {
-            printf("  [Add10] Failed: frame_id = %u\n", fid);
-            return false;
+        if (frame_id == 3) {
+            printf("%s: Failed: frame_id = %u\n", name().c_str(), frame_id);
+            return TaskStatus::FAILED;
         }
 
-        int y = x + 10;
-        printf("  [Add10] Success: frame_id = %u, input = %d, output = input + 10 = %d\n", fid, x, y);
+        int Y = X + 2;
+        printf("%s: Success: frame_id = %u, input = %d, output = %d\n", name().c_str(), frame_id, X, Y);
 
-        ctx.set_data(fid, DataTypeId::LEFT_IMAGE_PROCESSED, y);
+        ctx.write_data(frame_id, static_cast<data_type_id_t>(DataTypeId::Y), &Y);
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        return true;
+        return TaskStatus::COMPLETED;
     }
 };
 
-class MultiplyTwoTask final : public Task {
+class YTimes2EqualsZTask final : public Task {
 public:
-    MultiplyTwoTask() : Task("Mul2") {
-        printf("[MultiplyTwoTask] 创建任务 '%s'\n", name().c_str());
-    }
+    YTimes2EqualsZTask() : Task("Y*2=Z") {}
 
     const std::vector<data_type_id_t>& consumes() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::LEFT_IMAGE_PROCESSED),
+            static_cast<data_type_id_t>(DataTypeId::Y),
         };
         return v;
     }
 
     const std::vector<data_type_id_t>& produces() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::DISPARITY_IMAGE),
+            static_cast<data_type_id_t>(DataTypeId::Z),
         };
         return v;
     }
 
-    bool run(frame_id_t fid, TaskContext& ctx) override {
-        int x = 0;
-        if (!ctx.get_data(fid, DataTypeId::LEFT_IMAGE_PROCESSED, x)) {
-            return false;
+    auto run(frame_id_t frame_id, TaskContext& ctx) -> TaskStatus override {
+        auto y_lease = ctx.read_data_lease(frame_id, static_cast<data_type_id_t>(DataTypeId::Y));
+        if (!y_lease.ok()) {
+            return TaskStatus::FAILED;
         }
+        const int Y = *y_lease.as<int>();
 
-        int y = x * 2;
-        printf("  [Mul2] Success: frame_id = %u, input = %d, output = input * 2 = %d\n", fid, x, y);
+        int Z = Y * 2;
+        printf("%s: Success: frame_id = %u, input = %d, output = %d\n", name().c_str(), frame_id, Y, Z);
 
-        ctx.set_data(fid, DataTypeId::DISPARITY_IMAGE, y);
+        ctx.write_data(frame_id, static_cast<data_type_id_t>(DataTypeId::Z), &Z);
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        return true;
+        return TaskStatus::COMPLETED;
     }
 };
 
-class PrintTask final : public Task {
+class ZPlus3EqualsATask final : public Task {
 public:
-    explicit PrintTask() : Task("PrintResult") {
-        printf("[PrintTask] 创建任务 '%s'\n", name().c_str());
-    }
+    explicit ZPlus3EqualsATask() : Task("Z+3=A") {}
 
     const std::vector<data_type_id_t>& consumes() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::DISPARITY_IMAGE),
+            static_cast<data_type_id_t>(DataTypeId::Z),
         };
         return v;
     }
 
     const std::vector<data_type_id_t>& produces() const override {
         static const std::vector<data_type_id_t> v = {
-            static_cast<data_type_id_t>(DataTypeId::POINT_CLOUD),
+            static_cast<data_type_id_t>(DataTypeId::A),
         };
         return v;
     }
 
-    bool run(frame_id_t fid, TaskContext& ctx) override {
-        int result = 0;
-        if (!ctx.get_data(fid, DataTypeId::DISPARITY_IMAGE, result)) {
-            return false;
+    auto run(frame_id_t frame_id, TaskContext& ctx) -> TaskStatus override {
+        auto z_lease = ctx.read_data_lease(frame_id, static_cast<data_type_id_t>(DataTypeId::Z));
+        if (!z_lease.ok()) {
+            return TaskStatus::FAILED;
         }
+        const int Z = *z_lease.as<int>();
 
-        // 演示项目自定义的数据类型
-        demo::PointCloud point_cloud;
-        point_cloud.timestamp = fid;
-        point_cloud.points.push_back(demo::Point{1.0f, 2.0f, 3.0f, 0});
-        ctx.set_data(fid, DataTypeId::POINT_CLOUD, point_cloud);
+        int A = Z + 3;
+        ctx.write_data(frame_id, static_cast<data_type_id_t>(DataTypeId::A), &A);
 
-        printf("  [PrintResult] Success: frame_id = %u, result = %d\n", fid, result);
-        return true;
+        printf("%s: Success: frame_id = %u, input = %d, output = %d\n", name().c_str(), frame_id, Z, A);
+        return TaskStatus::COMPLETED;
     }
 };
 
-class DemoFlow final : public TaskFlow {
+class XPlusYEqualsBTask final : public Task {
 public:
-    explicit DemoFlow() : TaskFlow("DemoFlow") {
-        printf("[DemoFlow] >>> 开始创建任务流 '%s'\n", name().c_str());
-        register_data<int>(DataTypeId::LEFT_IMAGE);
-        register_data<int>(DataTypeId::LEFT_IMAGE_PROCESSED);
-        register_data<int>(DataTypeId::DISPARITY_IMAGE);
-        register_data<demo::PointCloud>(DataTypeId::POINT_CLOUD);
+    explicit XPlusYEqualsBTask() : Task("X+Y=B") {}
 
-        add_task(std::make_unique<AddTenTask>());
-        add_task(std::make_unique<MultiplyTwoTask>());
-        add_task(std::make_unique<PrintTask>());
-        printf("[DemoFlow] <<< 任务流 '%s' 创建完成\n", name().c_str());
+    const std::vector<data_type_id_t>& consumes() const override {
+        static const std::vector<data_type_id_t> v = {
+            static_cast<data_type_id_t>(DataTypeId::X),
+            static_cast<data_type_id_t>(DataTypeId::Y),
+        };
+        return v;
+    }
+
+    const std::vector<data_type_id_t>& produces() const override {
+        static const std::vector<data_type_id_t> v = {
+            static_cast<data_type_id_t>(DataTypeId::B),
+        };
+        return v;
+    }
+
+    auto run(frame_id_t frame_id, TaskContext& ctx) -> TaskStatus override {
+        auto x_lease = ctx.read_data_lease(frame_id, static_cast<data_type_id_t>(DataTypeId::X));
+        if (!x_lease.ok()) {
+            return TaskStatus::FAILED;
+        }
+        const int X = *x_lease.as<int>();
+
+        auto y_lease = ctx.read_data_lease(frame_id, static_cast<data_type_id_t>(DataTypeId::Y));
+        if (!y_lease.ok()) {
+            return TaskStatus::FAILED;
+        }
+        const int Y = *y_lease.as<int>();
+
+        int B = X + Y;
+        ctx.write_data(frame_id, static_cast<data_type_id_t>(DataTypeId::B), &B);
+
+        printf("%s: Success: frame_id = %u, input1 = %d, input2 = %d, output = %d\n", name().c_str(), frame_id, X, Y, B);
+        return TaskStatus::COMPLETED;
+    }
+};
+
+class CalculateA final : public TaskFlow {
+public:
+    explicit CalculateA() : TaskFlow("CalculateA") {
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::X), "X", sizeof(int), 10);
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::Y), "Y", sizeof(int), 10);
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::Z), "Z", sizeof(int), 10);
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::A), "A", sizeof(int), 10);
+
+        add_task(std::make_unique<XPlus2EqualsYTask>());
+        add_task(std::make_unique<YTimes2EqualsZTask>());
+        add_task(std::make_unique<ZPlus3EqualsATask>());
+    }
+};
+
+class CalculateB final : public TaskFlow {
+public:
+    explicit CalculateB() : TaskFlow("CalculateB") {
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::X), "X", sizeof(int), 10);
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::Y), "Y", sizeof(int), 10);
+        add_data_type(static_cast<data_type_id_t>(DataTypeId::B), "B", sizeof(int), 10);
+
+        add_task(std::make_unique<XPlusYEqualsBTask>());
     }
 };
 
 int main() {
-    printf("==================================\n");
-    printf("    DemoFlow: y = (x + 10) * 2    \n");
-    printf("==================================\n");
-
+    // X + 2 = Y
+    // Y * 2 = Z
+    // Z + 3 = A
+    // X + Y = B
+    // print A and B
     Scheduler scheduler;
-    scheduler.register_task_flow(std::make_unique<DemoFlow>());
+    scheduler.register_task_flow(std::make_unique<CalculateA>());
+    scheduler.register_task_flow(std::make_unique<CalculateB>());
 
     if (!scheduler.start()) {
-        printf("[scheduler_demo] Scheduler start failed\n");
+        printf("Scheduler start failed\n");
         return 1;
     }
-    printf("[scheduler_demo] Scheduler started\n");
 
     for (frame_id_t id = 1; id <= 5; ++id) {
         int input = static_cast<int>(id) * 2;
-        printf("[scheduler_demo] Feed data: frame = %u, input = %d\n", id, input);
-        if (!scheduler.feed(id, DataTypeId::LEFT_IMAGE, input)) {
-            printf("[scheduler_demo] Feed failed at frame %u\n", id);
+        const auto x_id = static_cast<data_type_id_t>(DataTypeId::X);
+        printf("Feed data type %u, frame %u, value %d\n", x_id, id, input);
+        if (!scheduler.feed(id, x_id, &input)) {
+            printf("Failed to feed data type %u, frame %u, value %d\n", x_id, id, input);
         }
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(20));
     scheduler.stop();
-    printf("[scheduler_demo] Scheduler stopped\n");
     return 0;
 }
